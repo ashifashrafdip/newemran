@@ -5,11 +5,38 @@ const sse = require('../sse');
 
 const router = express.Router();
 
-const adminSessions = new Set();
+// Secret key for HMAC token signing (persists across serverless container cold starts)
+const AUTH_SECRET = process.env.SESSION_SECRET || 'dis-portal-secure-hmac-token-secret-2026';
+
+function generateAdminToken() {
+  const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days validity
+  const payload = `admin:${expiresAt}`;
+  const signature = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex');
+  return Buffer.from(`${payload}:${signature}`).toString('base64');
+}
+
+function verifyAdminToken(token) {
+  if (!token) return false;
+  try {
+    const decoded = Buffer.from(token, 'base64').toString('utf8');
+    const [user, expiresAtStr, signature] = decoded.split(':');
+    if (user !== 'admin') return false;
+
+    const expiresAt = Number(expiresAtStr);
+    if (!expiresAt || Date.now() > expiresAt) return false; // expired
+
+    const expectedPayload = `${user}:${expiresAtStr}`;
+    const expectedSignature = crypto.createHmac('sha256', AUTH_SECRET).update(expectedPayload).digest('hex');
+
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
+  } catch (e) {
+    return false;
+  }
+}
 
 function authMiddleware(req, res, next) {
   const token = req.cookies.admin_session;
-  if (!token || !adminSessions.has(token)) {
+  if (!verifyAdminToken(token)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
@@ -22,13 +49,13 @@ router.post('/login', (req, res) => {
   const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
 
   if (username === adminUser && password === adminPass) {
-    const sessionToken = crypto.randomBytes(24).toString('hex');
-    adminSessions.add(sessionToken);
+    const sessionToken = generateAdminToken();
 
     res.cookie('admin_session', sessionToken, {
       httpOnly: true,
       sameSite: 'lax',
-      maxAge: 24 * 60 * 60 * 1000
+      secure: process.env.NODE_ENV === 'production' || !!process.env.VERCEL,
+      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 
     return res.json({ success: true });
@@ -42,11 +69,7 @@ router.get('/me', authMiddleware, (req, res) => {
 });
 
 router.post('/logout', (req, res) => {
-  const token = req.cookies.admin_session;
-  if (token) {
-    adminSessions.delete(token);
-    res.clearCookie('admin_session');
-  }
+  res.clearCookie('admin_session');
   res.json({ success: true });
 });
 

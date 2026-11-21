@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login</title>
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    .login-title {
+      font-size: 20px;
+      font-weight: 500;
+      margin-bottom: 24px;
+      text-align: center;
+      color: #1f1f1f;
+    }
+    .error-msg {
+      color: #b3261e;
+      font-size: 13px;
+      margin-bottom: 16px;
+      text-align: center;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="center-container">
+    <div class="card">
+      <div class="login-title">Admin</div>
+      <div class="error-msg" id="errorMsg">Invalid username or password</div>
+
+      <div class="input-group">
+        <input type="text" id="adminUser" autocomplete="off" placeholder=" " required />
+        <label for="adminUser">Username</label>
+      </div>
+
+      <div class="input-group">
+        <input type="password" id="adminPass" autocomplete="off" placeholder=" " required />
+        <label for="adminPass">Password</label>
+      </div>
+
+      <div class="action-row center-action">
+        <button type="button" class="btn btn-primary btn-full" id="btnLogin">Sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const btnLogin = document.getElementById('btnLogin');
+    const adminUser = document.getElementById('adminUser');
+    const adminPass = document.getElementById('adminPass');
+    const errorMsg = document.getElementById('errorMsg');
+
+    async function handleLogin() {
+      errorMsg.style.display = 'none';
+      const username = adminUser.value.trim();
+      const password = adminPass.value.trim();
+
+      if (!username || !password) return;
+
+      try {
+        const res = await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+
+        if (res.ok) {
+          window.location.href = '/admin';
+        } else {
+          errorMsg.style.display = 'block';
+        }
+      } catch (err) {
+        errorMsg.style.display = 'block';
+      }
+    }
+
+    btnLogin.addEventListener('click', handleLogin);
+    adminPass.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') handleLogin();
+    });
+  </script>
+</body>
+</html>

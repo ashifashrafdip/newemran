@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <div class="dashboard-container">
+    <div class="top-bar">
+      <h1>Admin Dashboard</h1>
+      <div class="top-actions">
+        <!-- 4-Digit PIN positioned neatly on the right side of header -->
+        <div class="top-pin-group">
+          <label for="pinInput" class="pin-top-label">PIN</label>
+          <input type="text" id="pinInput" maxlength="2" class="url-input pin-field" placeholder="--" />
+          <button type="button" class="btn-sm btn-approve" id="btnSaveSettings">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toastNotification" class="toast hidden">New submission received</div>
+
+    <!-- Stats Overview -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Total</div>
+        <div class="stat-value" id="statTotal">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Pending</div>
+        <div class="stat-value" id="statPending" style="color: #b06000;">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Approved</div>
+        <div class="stat-value" id="statApproved" style="color: #0d652d;">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Completed</div>
+        <div class="stat-value" id="statCompleted" style="color: #5b21b6;">0</div>
+      </div>
+    </div>
+
+    <!-- Submissions Table Panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Submissions</div>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 80px;">ID</th>
+              <th>User</th>
+              <th>Submitted Coupon</th>
+              <th style="width: 140px;">Status</th>
+              <th style="width: 180px; text-align: right;">Action</th>
+            </tr>
+          </thead>
+          <tbody id="submissionsTableBody">
+            <!-- Dynamic rows -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Sign out button placed at the bottom -->
+    <div class="bottom-bar">
+      <button type="button" class="btn-sm btn-reject" id="btnLogout">Sign out</button>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

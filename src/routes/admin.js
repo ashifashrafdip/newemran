@@ -74,83 +74,113 @@ router.post('/logout', (req, res) => {
 });
 
 // Get all submissions
-router.get('/submissions', authMiddleware, (req, res) => {
-  const submissions = db.getAllSubmissions();
-  res.json(submissions);
+router.get('/submissions', authMiddleware, async (req, res) => {
+  try {
+    const submissions = await db.getAllSubmissions();
+    res.json(submissions);
+  } catch (err) {
+    console.error('Error fetching submissions:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Approve submission
-router.post('/submissions/:id/approve', authMiddleware, (req, res) => {
-  const id = req.params.id;
-  const submission = db.getSubmissionById(id);
-  if (!submission) {
-    return res.status(404).json({ error: 'Submission not found' });
+router.post('/submissions/:id/approve', authMiddleware, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const submission = await db.getSubmissionById(id);
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    const currentGlobalPin = await db.getSetting('global_pin');
+    let pin = req.body.pin || currentGlobalPin || '1234';
+    pin = String(pin).trim();
+
+    await db.approveSubmission(id, pin);
+
+    const redirectUrl = await db.getRedirectUrl();
+
+    // Notify user via SSE
+    sse.notifyUser(submission.user_token, {
+      status: 'approved',
+      reward_pin: pin,
+      redirect_url: redirectUrl
+    });
+
+    // Notify all admin tabs
+    sse.notifyAdmins({
+      type: 'submission_approved',
+      id: Number(id),
+      pin: pin,
+      token: submission.user_token
+    });
+
+    res.json({ success: true, pin, username: submission.username, coupon: submission.submitted_coupon });
+  } catch (err) {
+    console.error('Error approving submission:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
-
-  let pin = req.body.pin || db.getSetting('global_pin') || '1234';
-  pin = String(pin).trim();
-
-  db.approveSubmission(id, pin);
-
-  const redirectUrl = db.getRedirectUrl();
-
-  sse.notifyUser(submission.user_token, {
-    status: 'approved',
-    reward_pin: pin,
-    redirect_url: redirectUrl
-  });
-
-  sse.notifyAdmins({
-    type: 'submission_approved',
-    id: Number(id),
-    pin: pin,
-    token: submission.user_token
-  });
-
-  res.json({ success: true, pin, username: submission.username, coupon: submission.submitted_coupon });
 });
 
 // Reject submission
-router.post('/submissions/:id/reject', authMiddleware, (req, res) => {
-  const id = req.params.id;
-  const submission = db.getSubmissionById(id);
-  if (!submission) {
-    return res.status(404).json({ error: 'Submission not found' });
+router.post('/submissions/:id/reject', authMiddleware, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const submission = await db.getSubmissionById(id);
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    await db.rejectSubmission(id);
+
+    sse.notifyUser(submission.user_token, {
+      status: 'rejected'
+    });
+
+    sse.notifyAdmins({
+      type: 'submission_rejected',
+      id: Number(id),
+      token: submission.user_token
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error rejecting submission:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
-
-  db.rejectSubmission(id);
-
-  sse.notifyUser(submission.user_token, {
-    status: 'rejected'
-  });
-
-  sse.notifyAdmins({
-    type: 'submission_rejected',
-    id: Number(id),
-    token: submission.user_token
-  });
-
-  res.json({ success: true });
 });
 
 // Get & Update PIN Settings only
-router.get('/settings', authMiddleware, (req, res) => {
-  res.json({
-    global_pin: db.getSetting('global_pin')
-  });
+router.get('/settings', authMiddleware, async (req, res) => {
+  try {
+    const pin = await db.getSetting('global_pin');
+    res.json({
+      global_pin: pin || '1234'
+    });
+  } catch (err) {
+    console.error('Error getting settings:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-router.post('/settings', authMiddleware, (req, res) => {
-  const { global_pin } = req.body;
+router.post('/settings', authMiddleware, async (req, res) => {
+  try {
+    const { global_pin } = req.body;
 
-  if (global_pin !== undefined) {
-    db.setSetting('global_pin', String(global_pin).trim());
+    if (global_pin !== undefined) {
+      await db.setSetting('global_pin', String(global_pin).trim());
+    }
+
+    const updatedPin = await db.getSetting('global_pin');
+    res.json({
+      success: true,
+      global_pin: updatedPin
+    });
+  } catch (err) {
+    console.error('Error saving settings:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
-
-  res.json({
-    success: true,
-    global_pin: db.getSetting('global_pin')
-  });
 });
 
 // SSE for admin live updates

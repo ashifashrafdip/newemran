@@ -1,28 +1,18 @@
-let sqliteModule;
-try {
-  sqliteModule = require('node:sqlite');
-} catch (e) {
-  sqliteModule = null;
-}
+const { neon } = require('@neondatabase/serverless');
 
-const path = require('path');
-const fs = require('fs');
+// Database connection string from environment variable (Neon Serverless PostgreSQL)
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL;
 
-const isVercel = process.env.VERCEL || process.env.NOW_REGION;
-const dataDir = isVercel ? '/tmp' : path.join(__dirname, '..', 'data');
-
-if (!fs.existsSync(dataDir)) {
+let sql = null;
+if (DATABASE_URL) {
   try {
-    fs.mkdirSync(dataDir, { recursive: true });
-  } catch (e) {}
+    sql = neon(DATABASE_URL);
+  } catch (err) {
+    console.error('Failed to initialize Neon client:', err);
+  }
 }
 
-const dbPath = path.join(dataDir, 'app.db');
-
-let db = null;
-let useFallback = false;
-
-// In-memory fallback if node:sqlite is not supported on older Vercel Node runtime
+// In-memory fallback if DATABASE_URL is not set (e.g. initial local dev)
 const inMemoryData = {
   submissions: [],
   settings: {
@@ -32,60 +22,58 @@ const inMemoryData = {
   nextId: 1
 };
 
-if (sqliteModule && sqliteModule.DatabaseSync) {
+// Initialize Neon table schemas on demand
+let tablesInitialized = false;
+async function ensureTables() {
+  if (!sql || tablesInitialized) return;
   try {
-    db = new sqliteModule.DatabaseSync(dbPath);
-    db.exec(`
+    await sql`
       CREATE TABLE IF NOT EXISTS submissions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_token TEXT UNIQUE NOT NULL,
-        username TEXT NOT NULL,
-        submitted_coupon TEXT NOT NULL,
-        reward_pin TEXT,
-        status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL,
-        decided_at TEXT,
-        completed_at TEXT
+        id SERIAL PRIMARY KEY,
+        user_token VARCHAR(255) UNIQUE NOT NULL,
+        username VARCHAR(255) NOT NULL,
+        submitted_coupon VARCHAR(255) NOT NULL,
+        reward_pin VARCHAR(20),
+        status VARCHAR(50) NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        decided_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ
       );
+    `;
 
+    await sql`
       CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
+        key VARCHAR(100) PRIMARY KEY,
         value TEXT NOT NULL
       );
-    `);
+    `;
 
-    const checkPinStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-    if (!checkPinStmt.get('global_pin')) {
-      const insertStmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-      insertStmt.run('global_pin', '1234');
-    }
+    await sql`
+      INSERT INTO settings (key, value)
+      VALUES ('global_pin', '1234')
+      ON CONFLICT (key) DO NOTHING;
+    `;
+
+    tablesInitialized = true;
   } catch (err) {
-    console.error('SQLite init failed, falling back to memory/file store:', err);
-    useFallback = true;
+    console.error('Error creating Neon tables:', err);
   }
-} else {
-  useFallback = true;
 }
 
 module.exports = {
-  createSubmission: (token, username, coupon) => {
-    const now = new Date().toISOString();
-    if (!useFallback && db) {
-      const stmt = db.prepare(`
+  ensureTables,
+
+  createSubmission: async (token, username, coupon) => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
         INSERT INTO submissions (user_token, username, submitted_coupon, status, created_at)
-        VALUES (?, ?, ?, 'pending', ?)
-      `);
-      const result = stmt.run(token, username, coupon, now);
-      return {
-        id: Number(result.lastInsertRowid),
-        user_token: token,
-        username,
-        submitted_coupon: coupon,
-        reward_pin: null,
-        status: 'pending',
-        created_at: now
-      };
+        VALUES (${token}, ${username}, ${coupon}, 'pending', NOW())
+        RETURNING id, user_token, username, submitted_coupon, reward_pin, status, created_at
+      `;
+      return rows[0];
     } else {
+      const now = new Date().toISOString();
       const sub = {
         id: inMemoryData.nextId++,
         user_token: token,
@@ -99,105 +87,126 @@ module.exports = {
       return sub;
     }
   },
-  getSubmissionByToken: (token) => {
-    if (!useFallback && db) {
-      const stmt = db.prepare('SELECT * FROM submissions WHERE user_token = ?');
-      return stmt.get(token);
+
+  getSubmissionByToken: async (token) => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
+        SELECT * FROM submissions WHERE user_token = ${token} LIMIT 1
+      `;
+      return rows[0] || null;
     }
-    return inMemoryData.submissions.find(s => s.user_token === token);
+    return inMemoryData.submissions.find(s => s.user_token === token) || null;
   },
-  getSubmissionById: (id) => {
-    if (!useFallback && db) {
-      const stmt = db.prepare('SELECT * FROM submissions WHERE id = ?');
-      return stmt.get(id);
+
+  getSubmissionById: async (id) => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
+        SELECT * FROM submissions WHERE id = ${Number(id)} LIMIT 1
+      `;
+      return rows[0] || null;
     }
-    return inMemoryData.submissions.find(s => s.id === Number(id));
+    return inMemoryData.submissions.find(s => s.id === Number(id)) || null;
   },
-  getAllSubmissions: () => {
-    if (!useFallback && db) {
-      const stmt = db.prepare('SELECT * FROM submissions ORDER BY id DESC');
-      return stmt.all();
+
+  getAllSubmissions: async () => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
+        SELECT * FROM submissions ORDER BY id DESC
+      `;
+      return rows;
     }
     return [...inMemoryData.submissions].reverse();
   },
-  approveSubmission: (id, pin) => {
-    const now = new Date().toISOString();
-    if (!useFallback && db) {
-      const stmt = db.prepare(`
+
+  approveSubmission: async (id, pin) => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
         UPDATE submissions
-        SET status = 'approved', reward_pin = ?, decided_at = ?
-        WHERE id = ?
-      `);
-      stmt.run(pin, now, id);
-      return stmt.changes;
+        SET status = 'approved', reward_pin = ${pin}, decided_at = NOW()
+        WHERE id = ${Number(id)}
+        RETURNING *
+      `;
+      return rows[0] || null;
     }
     const sub = inMemoryData.submissions.find(s => s.id === Number(id));
     if (sub) {
       sub.status = 'approved';
       sub.reward_pin = pin;
-      sub.decided_at = now;
-      return 1;
+      sub.decided_at = new Date().toISOString();
+      return sub;
     }
-    return 0;
+    return null;
   },
-  rejectSubmission: (id) => {
-    const now = new Date().toISOString();
-    if (!useFallback && db) {
-      const stmt = db.prepare(`
+
+  rejectSubmission: async (id) => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
         UPDATE submissions
-        SET status = 'rejected', decided_at = ?
-        WHERE id = ?
-      `);
-      stmt.run(now, id);
-      return stmt.changes;
+        SET status = 'rejected', decided_at = NOW()
+        WHERE id = ${Number(id)}
+        RETURNING *
+      `;
+      return rows[0] || null;
     }
     const sub = inMemoryData.submissions.find(s => s.id === Number(id));
     if (sub) {
       sub.status = 'rejected';
-      sub.decided_at = now;
-      return 1;
+      sub.decided_at = new Date().toISOString();
+      return sub;
     }
-    return 0;
+    return null;
   },
-  completeSubmission: (token) => {
-    const now = new Date().toISOString();
-    if (!useFallback && db) {
-      const stmt = db.prepare(`
+
+  completeSubmission: async (token) => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
         UPDATE submissions
-        SET status = 'completed', completed_at = ?
-        WHERE user_token = ?
-      `);
-      stmt.run(now, token);
-      return stmt.changes;
+        SET status = 'completed', completed_at = NOW()
+        WHERE user_token = ${token}
+        RETURNING *
+      `;
+      return rows[0] || null;
     }
     const sub = inMemoryData.submissions.find(s => s.user_token === token);
     if (sub) {
       sub.status = 'completed';
-      sub.completed_at = now;
-      return 1;
+      sub.completed_at = new Date().toISOString();
+      return sub;
     }
-    return 0;
+    return null;
   },
-  getSetting: (key) => {
-    if (!useFallback && db) {
-      const stmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-      const row = stmt.get(key);
-      return row ? row.value : '';
+
+  getSetting: async (key) => {
+    if (sql) {
+      await ensureTables();
+      const rows = await sql`
+        SELECT value FROM settings WHERE key = ${key} LIMIT 1
+      `;
+      return rows[0] ? rows[0].value : '';
     }
     return inMemoryData.settings[key] || '';
   },
-  setSetting: (key, value) => {
-    if (!useFallback && db) {
-      const stmt = db.prepare(`
-        INSERT INTO settings (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `);
-      stmt.run(key, value);
+
+  setSetting: async (key, value) => {
+    if (sql) {
+      await ensureTables();
+      await sql`
+        INSERT INTO settings (key, value)
+        VALUES (${key}, ${value})
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+      `;
       return;
     }
     inMemoryData.settings[key] = value;
   },
-  getRedirectUrl: () => {
+
+  getRedirectUrl: async () => {
     return process.env.REDIRECT_URL || process.env.DEFAULT_REDIRECT_URL || 'https://google.com';
   }
 };

@@ -11,6 +11,8 @@ const statCompleted = document.getElementById('statCompleted');
 
 let submissions = [];
 let audioContext = null;
+let lastSeenSubmissionId = 0;
+let pollTimer = null;
 
 // Minimal notification sound
 function playNotificationSound() {
@@ -65,18 +67,31 @@ async function loadSettings() {
     const res = await fetch('/api/admin/settings');
     if (res.ok) {
       const data = await res.json();
-      pinInput.value = data.global_pin || '12';
+      pinInput.value = data.global_pin || '1234';
     }
   } catch (e) {
     console.error(e);
   }
 }
 
-async function loadSubmissions() {
+async function loadSubmissions(silent = false) {
   try {
     const res = await fetch('/api/admin/submissions');
     if (res.ok) {
-      submissions = await res.json();
+      const newSubmissions = await res.json();
+      
+      // Detect newly arrived submissions across any admin instance
+      if (submissions.length > 0 && newSubmissions.length > 0) {
+        const newestOldId = Math.max(...submissions.map(s => Number(s.id)));
+        const freshlyAdded = newSubmissions.filter(s => Number(s.id) > newestOldId);
+        
+        if (freshlyAdded.length > 0 && !silent) {
+          playNotificationSound();
+          showToast(`New submission: ${freshlyAdded[0].username}`);
+        }
+      }
+
+      submissions = newSubmissions;
       renderTable();
       updateStats();
     }
@@ -156,7 +171,7 @@ async function copyToClipboard(text) {
 
 // Global actions for inline buttons
 window.handleApprove = async function(id) {
-  const currentPin = pinInput.value.trim() || '12';
+  const currentPin = pinInput.value.trim() || '1234';
 
   try {
     const res = await fetch(`/api/admin/submissions/${id}/approve`, {
@@ -166,7 +181,6 @@ window.handleApprove = async function(id) {
     });
 
     if (res.ok) {
-      const data = await res.json();
       const sub = submissions.find(s => s.id === id);
       if (sub) {
         sub.status = 'approved';
@@ -179,6 +193,8 @@ window.handleApprove = async function(id) {
         await copyToClipboard(textToCopy);
         showToast('Copied user & coupon to clipboard');
       }
+      // Trigger background sync across all admins
+      loadSubmissions(true);
     } else {
       const err = await res.json();
       alert(err.error || 'Failed to approve');
@@ -203,6 +219,7 @@ window.handleReject = async function(id) {
         renderTable();
         updateStats();
       }
+      loadSubmissions(true);
     }
   } catch (err) {
     console.error(err);
@@ -213,8 +230,8 @@ window.handleReject = async function(id) {
 btnSaveSettings.addEventListener('click', async () => {
   const pin = pinInput.value.trim();
 
-  if (pin && pin.length !== 2) {
-    alert('PIN must be 2 digits');
+  if (pin && pin.length !== 4) {
+    alert('PIN must be 4 digits');
     return;
   }
 
@@ -235,61 +252,49 @@ btnSaveSettings.addEventListener('click', async () => {
 
 // Logout
 btnLogout.addEventListener('click', async () => {
+  if (pollTimer) clearInterval(pollTimer);
   await fetch('/api/admin/logout', { method: 'POST' });
   window.location.href = '/admin/login';
 });
 
-// Live Updates SSE
-function setupAdminSSE() {
-  const sse = new EventSource('/api/admin/events');
+// Multi-admin real-time sync: SSE + 2-second background polling
+function setupAdminRealtime() {
+  // Polling every 2s ensures that even across different Vercel serverless containers,
+  // multiple admins are always 100% in sync without missing a single submission or decision
+  pollTimer = setInterval(() => {
+    loadSubmissions(false);
+  }, 2000);
 
-  sse.onmessage = async (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      if (data.type === 'new_submission') {
-        // Refetch latest submissions to ensure full data consistency
-        await loadSubmissions();
-        playNotificationSound();
-        showToast(`New submission: ${data.submission.username}`);
-      } else if (data.type === 'submission_approved') {
-        const sub = submissions.find(s => s.id === data.id);
-        if (sub) {
-          sub.status = 'approved';
-          sub.reward_pin = data.pin;
-          renderTable();
-          updateStats();
+  try {
+    const sse = new EventSource('/api/admin/events');
+
+    sse.onmessage = async (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'new_submission') {
+          await loadSubmissions(false);
+        } else if (data.type === 'submission_approved' || data.type === 'submission_rejected' || data.type === 'status_updated') {
+          await loadSubmissions(true);
         }
-      } else if (data.type === 'submission_rejected') {
-        const sub = submissions.find(s => s.id === data.id);
-        if (sub) {
-          sub.status = 'rejected';
-          renderTable();
-          updateStats();
-        }
-      } else if (data.type === 'status_updated') {
-        const sub = submissions.find(s => s.user_token === data.token);
-        if (sub) {
-          sub.status = data.status;
-          renderTable();
-          updateStats();
-        }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
-    }
-  };
+    };
 
-  sse.onerror = () => {
-    // Retry reconnection automatically
-  };
+    sse.onerror = () => {
+      // Reconnection handled automatically by browser; pollTimer keeps sync alive
+    };
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 // Init
 (async () => {
   const isAuthed = await checkAuth();
   if (isAuthed) {
-    loadSettings();
-    loadSubmissions();
-    setupAdminSSE();
+    await loadSettings();
+    await loadSubmissions(true);
+    setupAdminRealtime();
   }
 })();

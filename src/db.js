@@ -16,7 +16,7 @@ if (DATABASE_URL) {
 const inMemoryData = {
   submissions: [],
   settings: {
-    global_pin: '1234',
+    global_pin: '12',
     redirect_url: ''
   },
   nextId: 1
@@ -50,7 +50,7 @@ async function ensureTables() {
 
     await sql`
       INSERT INTO settings (key, value)
-      VALUES ('global_pin', '1234')
+      VALUES ('global_pin', '12')
       ON CONFLICT (key) DO NOTHING;
     `;
 

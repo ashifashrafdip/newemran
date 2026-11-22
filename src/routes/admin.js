@@ -94,7 +94,7 @@ router.post('/submissions/:id/approve', authMiddleware, async (req, res) => {
     }
 
     const currentGlobalPin = await db.getSetting('global_pin');
-    let pin = req.body.pin || currentGlobalPin || '1234';
+    let pin = req.body.pin || currentGlobalPin || '12';
     pin = String(pin).trim();
 
     await db.approveSubmission(id, pin);
@@ -156,7 +156,7 @@ router.get('/settings', authMiddleware, async (req, res) => {
   try {
     const pin = await db.getSetting('global_pin');
     res.json({
-      global_pin: pin || '1234'
+      global_pin: pin || '12'
     });
   } catch (err) {
     console.error('Error getting settings:', err);

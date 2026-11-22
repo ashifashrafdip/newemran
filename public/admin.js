@@ -67,7 +67,7 @@ async function loadSettings() {
     const res = await fetch('/api/admin/settings');
     if (res.ok) {
       const data = await res.json();
-      pinInput.value = data.global_pin || '1234';
+      pinInput.value = data.global_pin || '12';
     }
   } catch (e) {
     console.error(e);
@@ -230,8 +230,8 @@ window.handleReject = async function(id) {
 btnSaveSettings.addEventListener('click', async () => {
   const pin = pinInput.value.trim();
 
-  if (pin && pin.length !== 4) {
-    alert('PIN must be 4 digits');
+  if (pin && (pin.length < 2 || pin.length > 4)) {
+    alert('PIN must be 2 to 4 digits');
     return;
   }
 
@@ -244,6 +244,7 @@ btnSaveSettings.addEventListener('click', async () => {
 
     if (res.ok) {
       showToast('PIN saved');
+      await loadSettings();
     }
   } catch (err) {
     console.error(err);

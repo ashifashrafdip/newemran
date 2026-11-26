@@ -1,61 +1,57 @@
 const express = require('express');
 const crypto = require('crypto');
-const db = require('../db');
-const sse = require('../sse');
+const database = require('../db');
+const eventHub = require('../sse');
+const config = require('../config');
 
-const router = express.Router();
+const adminEndpointRouter = express.Router();
 
-// Secret key for HMAC token signing (persists across serverless container cold starts)
-const AUTH_SECRET = process.env.SESSION_SECRET || 'dis-portal-secure-hmac-token-secret-2026';
-
-function generateAdminToken() {
-  const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days validity
-  const payload = `admin:${expiresAt}`;
-  const signature = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex');
-  return Buffer.from(`${payload}:${signature}`).toString('base64');
+function createAdminAuthToken() {
+  const expiryTimestamp = Date.now() + config.SESSION_MAX_AGE_MS;
+  const tokenPayload = `admin:${expiryTimestamp}`;
+  const hmacDigest = crypto.createHmac('sha256', config.SESSION_SECRET).update(tokenPayload).digest('hex');
+  return Buffer.from(`${tokenPayload}:${hmacDigest}`).toString('base64');
 }
 
-function verifyAdminToken(token) {
-  if (!token) return false;
+function validateAdminAuthToken(rawTokenString) {
+  if (!rawTokenString) return false;
   try {
-    const decoded = Buffer.from(token, 'base64').toString('utf8');
-    const [user, expiresAtStr, signature] = decoded.split(':');
-    if (user !== 'admin') return false;
+    const decodedToken = Buffer.from(rawTokenString, 'base64').toString('utf8');
+    const [principalName, expiryTimestampStr, signatureHash] = decodedToken.split(':');
+    if (principalName !== 'admin') return false;
 
-    const expiresAt = Number(expiresAtStr);
-    if (!expiresAt || Date.now() > expiresAt) return false; // expired
+    const expiryTimestamp = Number(expiryTimestampStr);
+    if (!expiryTimestamp || Date.now() > expiryTimestamp) return false;
 
-    const expectedPayload = `${user}:${expiresAtStr}`;
-    const expectedSignature = crypto.createHmac('sha256', AUTH_SECRET).update(expectedPayload).digest('hex');
+    const expectedPayload = `${principalName}:${expiryTimestampStr}`;
+    const expectedSignature = crypto.createHmac('sha256', config.SESSION_SECRET).update(expectedPayload).digest('hex');
 
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
-  } catch (e) {
+    return crypto.timingSafeEqual(Buffer.from(signatureHash), Buffer.from(expectedSignature));
+  } catch (parseErr) {
     return false;
   }
 }
 
-function authMiddleware(req, res, next) {
-  const token = req.cookies.admin_session;
-  if (!verifyAdminToken(token)) {
+function requireAdminAuth(req, res, next) {
+  const sessionCookieToken = req.cookies.admin_session;
+  if (!validateAdminAuthToken(sessionCookieToken)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
 }
 
 // Admin login
-router.post('/login', (req, res) => {
-  const { username, password } = req.body;
-  const adminUser = process.env.ADMIN_USERNAME || 'admin';
-  const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
+adminEndpointRouter.post('/login', (req, res) => {
+  const { username: submittedUsername, password: submittedPassword } = req.body;
 
-  if (username === adminUser && password === adminPass) {
-    const sessionToken = generateAdminToken();
+  if (submittedUsername === config.ADMIN_USERNAME && submittedPassword === config.ADMIN_PASSWORD) {
+    const freshSessionToken = createAdminAuthToken();
 
-    res.cookie('admin_session', sessionToken, {
+    res.cookie('admin_session', freshSessionToken, {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production' || !!process.env.VERCEL,
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+      maxAge: config.SESSION_MAX_AGE_MS
     });
 
     return res.json({ success: true });
@@ -64,133 +60,138 @@ router.post('/login', (req, res) => {
   return res.status(401).json({ error: 'Invalid credentials' });
 });
 
-router.get('/me', authMiddleware, (req, res) => {
+adminEndpointRouter.get('/me', requireAdminAuth, (req, res) => {
   res.json({ authenticated: true });
 });
 
-router.post('/logout', (req, res) => {
+adminEndpointRouter.post('/logout', (req, res) => {
   res.clearCookie('admin_session');
   res.json({ success: true });
 });
 
-// Get all submissions
-router.get('/submissions', authMiddleware, async (req, res) => {
+// Fetch all client submissions
+adminEndpointRouter.get('/submissions', requireAdminAuth, async (req, res) => {
   try {
-    const submissions = await db.getAllSubmissions();
-    res.json(submissions);
-  } catch (err) {
-    console.error('Error fetching submissions:', err);
+    const submissionRecords = await database.fetchAllSubmissions();
+    res.json(submissionRecords);
+  } catch (fetchErr) {
+    console.error('Error fetching submissions:', fetchErr);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // Approve submission
-router.post('/submissions/:id/approve', authMiddleware, async (req, res) => {
+adminEndpointRouter.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
   try {
-    const id = req.params.id;
-    const submission = await db.getSubmissionById(id);
-    if (!submission) {
+    const submissionId = req.params.id;
+    const targetRecord = await database.findSubmissionById(submissionId);
+    if (!targetRecord) {
       return res.status(404).json({ error: 'Submission not found' });
     }
 
-    const currentGlobalPin = await db.getSetting('global_pin');
-    let pin = req.body.pin || currentGlobalPin || '12';
-    pin = String(pin).trim();
+    const currentSavedPin = await database.retrieveConfigurationParam('global_pin');
+    let effectivePin = req.body.pin || currentSavedPin || config.DEFAULT_PASSCODE;
+    effectivePin = String(effectivePin).trim();
 
-    await db.approveSubmission(id, pin);
+    await database.grantSubmissionApproval(submissionId, effectivePin);
 
-    const redirectUrl = await db.getRedirectUrl();
+    const targetRedirectUrl = await database.resolveTargetRedirectUrl();
 
-    // Notify user via SSE
-    sse.notifyUser(submission.user_token, {
+    // Notify target user
+    eventHub.broadcastToUser(targetRecord.user_token, {
       status: 'approved',
-      reward_pin: pin,
-      redirect_url: redirectUrl
+      reward_pin: effectivePin,
+      redirect_url: targetRedirectUrl
     });
 
-    // Notify all admin tabs
-    sse.notifyAdmins({
+    // Notify all admin dashboards
+    eventHub.broadcastToAllAdmins({
       type: 'submission_approved',
-      id: Number(id),
-      pin: pin,
-      token: submission.user_token
+      id: Number(submissionId),
+      pin: effectivePin,
+      token: targetRecord.user_token
     });
 
-    res.json({ success: true, pin, username: submission.username, coupon: submission.submitted_coupon });
-  } catch (err) {
-    console.error('Error approving submission:', err);
+    res.json({
+      success: true,
+      pin: effectivePin,
+      username: targetRecord.username,
+      coupon: targetRecord.submitted_coupon
+    });
+  } catch (approveErr) {
+    console.error('Error approving submission:', approveErr);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // Reject submission
-router.post('/submissions/:id/reject', authMiddleware, async (req, res) => {
+adminEndpointRouter.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
   try {
-    const id = req.params.id;
-    const submission = await db.getSubmissionById(id);
-    if (!submission) {
+    const submissionId = req.params.id;
+    const targetRecord = await database.findSubmissionById(submissionId);
+    if (!targetRecord) {
       return res.status(404).json({ error: 'Submission not found' });
     }
 
-    await db.rejectSubmission(id);
+    await database.rejectSubmissionRecord(submissionId);
 
-    sse.notifyUser(submission.user_token, {
+    eventHub.broadcastToUser(targetRecord.user_token, {
       status: 'rejected'
     });
 
-    sse.notifyAdmins({
+    eventHub.broadcastToAllAdmins({
       type: 'submission_rejected',
-      id: Number(id),
-      token: submission.user_token
+      id: Number(submissionId),
+      token: targetRecord.user_token
     });
 
     res.json({ success: true });
-  } catch (err) {
-    console.error('Error rejecting submission:', err);
+  } catch (rejectErr) {
+    console.error('Error rejecting submission:', rejectErr);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Get & Update PIN Settings only
-router.get('/settings', authMiddleware, async (req, res) => {
+// PIN settings management
+adminEndpointRouter.get('/settings', requireAdminAuth, async (req, res) => {
   try {
-    const pin = await db.getSetting('global_pin');
+    const storedPin = await database.retrieveConfigurationParam('global_pin');
     res.json({
-      global_pin: pin || '12'
+      global_pin: storedPin || config.DEFAULT_PASSCODE
     });
-  } catch (err) {
-    console.error('Error getting settings:', err);
+  } catch (paramErr) {
+    console.error('Error getting settings:', paramErr);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-router.post('/settings', authMiddleware, async (req, res) => {
+adminEndpointRouter.post('/settings', requireAdminAuth, async (req, res) => {
   try {
-    const { global_pin } = req.body;
+    const { global_pin: newPinValue } = req.body;
 
-    if (global_pin !== undefined) {
-      await db.setSetting('global_pin', String(global_pin).trim());
+    if (newPinValue !== undefined) {
+      await database.updateConfigurationParam('global_pin', String(newPinValue).trim());
     }
 
-    const updatedPin = await db.getSetting('global_pin');
+    const savedPinResult = await database.retrieveConfigurationParam('global_pin');
     res.json({
       success: true,
-      global_pin: updatedPin
+      global_pin: savedPinResult
     });
-  } catch (err) {
-    console.error('Error saving settings:', err);
+  } catch (updateErr) {
+    console.error('Error saving settings:', updateErr);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// SSE for admin live updates
-router.get('/events', authMiddleware, (req, res) => {
+// SSE updates for admin dashboard
+adminEndpointRouter.get('/events', requireAdminAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  sse.subscribeAdmin(res);
+  eventHub.registerAdminStream(res);
 });
 
-module.exports = router;
+module.exports = adminEndpointRouter;

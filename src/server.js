@@ -1,36 +1,35 @@
-require('dotenv').config();
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const path = require('path');
+const config = require('./config');
 
-const userRoutes = require('./routes/user');
-const adminRoutes = require('./routes/admin');
+const userApiRoutes = require('./routes/user');
+const adminApiRoutes = require('./routes/admin');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const applicationInstance = express();
 
-app.use(express.json());
-app.use(cookieParser());
-app.use(express.static(path.join(__dirname, '..', 'public')));
+applicationInstance.use(express.json());
+applicationInstance.use(cookieParser());
+applicationInstance.use(express.static(path.join(__dirname, '..', 'public')));
 
-// API routes
-app.use('/api', userRoutes);
-app.use('/api/admin', adminRoutes);
+// Mount API routers
+applicationInstance.use('/api', userApiRoutes);
+applicationInstance.use('/api/admin', adminApiRoutes);
 
-// Fallback routing for pages
-app.get('/admin', (req, res) => {
+// Static page routes
+applicationInstance.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'admin.html'));
 });
 
-app.get('/admin/login', (req, res) => {
+applicationInstance.get('/admin/login', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'admin-login.html'));
 });
 
-// Start listen only if run directly (local), not when exported as Vercel serverless function
+// Run server only when executed directly (not when required as serverless function)
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  applicationInstance.listen(config.PORT, () => {
+    console.log(`Server running on http://localhost:${config.PORT}`);
   });
 }
 
-module.exports = app;
+module.exports = applicationInstance;

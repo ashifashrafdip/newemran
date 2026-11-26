@@ -1,301 +1,297 @@
-const tableBody = document.getElementById('submissionsTableBody');
-const pinInput = document.getElementById('pinInput');
-const btnSaveSettings = document.getElementById('btnSaveSettings');
-const btnLogout = document.getElementById('btnLogout');
-const toastNotification = document.getElementById('toastNotification');
+const domTableBody = document.getElementById('submissionsTableBody');
+const domInputPin = document.getElementById('pinInput');
+const domBtnSaveSettings = document.getElementById('btnSaveSettings');
+const domBtnLogout = document.getElementById('btnLogout');
+const domNotificationToast = document.getElementById('toastNotification');
 
-const statTotal = document.getElementById('statTotal');
-const statPending = document.getElementById('statPending');
-const statApproved = document.getElementById('statApproved');
-const statCompleted = document.getElementById('statCompleted');
+const domStatTotal = document.getElementById('statTotal');
+const domStatPending = document.getElementById('statPending');
+const domStatApproved = document.getElementById('statApproved');
+const domStatCompleted = document.getElementById('statCompleted');
 
-let submissions = [];
-let audioContext = null;
-let lastSeenSubmissionId = 0;
-let pollTimer = null;
+let cachedSubmissionsList = [];
+let audioChimeContext = null;
+let liveSyncIntervalTimer = null;
 
-// Minimal notification sound
-function playNotificationSound() {
+function triggerAudioAlert() {
   try {
-    if (!audioContext) {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (!audioChimeContext) {
+      audioChimeContext = new (window.AudioContext || window.webkitAudioContext)();
     }
-    if (audioContext.state === 'suspended') {
-      audioContext.resume();
+    if (audioChimeContext.state === 'suspended') {
+      audioChimeContext.resume();
     }
-    const osc = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(587.33, audioContext.currentTime);
-    osc.frequency.setValueAtTime(880, audioContext.currentTime + 0.1);
-    gain.gain.setValueAtTime(0.15, audioContext.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.35);
-    osc.connect(gain);
-    gain.connect(audioContext.destination);
-    osc.start();
-    osc.stop(audioContext.currentTime + 0.35);
-  } catch (e) {
-    console.error(e);
+    const oscillatorNode = audioChimeContext.createOscillator();
+    const gainNode = audioChimeContext.createGain();
+    oscillatorNode.type = 'sine';
+    oscillatorNode.frequency.setValueAtTime(587.33, audioChimeContext.currentTime);
+    oscillatorNode.frequency.setValueAtTime(880, audioChimeContext.currentTime + 0.1);
+    gainNode.gain.setValueAtTime(0.15, audioChimeContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioChimeContext.currentTime + 0.35);
+    oscillatorNode.connect(gainNode);
+    gainNode.connect(audioChimeContext.destination);
+    oscillatorNode.start();
+    oscillatorNode.stop(audioChimeContext.currentTime + 0.35);
+  } catch (audioErr) {
+    console.error('Audio alert error:', audioErr);
   }
 }
 
-function showToast(message) {
-  toastNotification.textContent = message;
-  toastNotification.classList.remove('hidden');
+function displayBannerNotification(notificationText) {
+  domNotificationToast.textContent = notificationText;
+  domNotificationToast.classList.remove('hidden');
   setTimeout(() => {
-    toastNotification.classList.add('hidden');
+    domNotificationToast.classList.add('hidden');
   }, 3500);
 }
 
-// Check auth & load data
-async function checkAuth() {
+async function verifyAdminAuthentication() {
   try {
-    const res = await fetch('/api/admin/me');
-    if (!res.ok) {
+    const authCheckResponse = await fetch('/api/admin/me');
+    if (!authCheckResponse.ok) {
       window.location.href = '/admin/login';
       return false;
     }
     return true;
-  } catch (err) {
+  } catch (authErr) {
     window.location.href = '/admin/login';
     return false;
   }
 }
 
-async function loadSettings() {
+async function fetchSavedSettings() {
   try {
-    const res = await fetch('/api/admin/settings');
-    if (res.ok) {
-      const data = await res.json();
-      pinInput.value = data.global_pin || '12';
+    const settingsResponse = await fetch('/api/admin/settings');
+    if (settingsResponse.ok) {
+      const settingsPayload = await settingsResponse.json();
+      domInputPin.value = settingsPayload.global_pin || '12';
     }
-  } catch (e) {
-    console.error(e);
+  } catch (settingsErr) {
+    console.error('Settings fetch error:', settingsErr);
   }
 }
 
-async function loadSubmissions(silent = false) {
+async function refreshSubmissionRecords(suppressAlert = false) {
   try {
-    const res = await fetch('/api/admin/submissions');
-    if (res.ok) {
-      const newSubmissions = await res.json();
-      
-      // Detect newly arrived submissions across any admin instance
-      if (submissions.length > 0 && newSubmissions.length > 0) {
-        const newestOldId = Math.max(...submissions.map(s => Number(s.id)));
-        const freshlyAdded = newSubmissions.filter(s => Number(s.id) > newestOldId);
-        
-        if (freshlyAdded.length > 0 && !silent) {
-          playNotificationSound();
-          showToast(`New submission: ${freshlyAdded[0].username}`);
+    const fetchResponse = await fetch('/api/admin/submissions');
+    if (fetchResponse.ok) {
+      const latestEntries = await fetchResponse.json();
+
+      if (cachedSubmissionsList.length > 0 && latestEntries.length > 0) {
+        const previousHighestId = Math.max(...cachedSubmissionsList.map(entry => Number(entry.id)));
+        const newlyReceivedEntries = latestEntries.filter(entry => Number(entry.id) > previousHighestId);
+
+        if (newlyReceivedEntries.length > 0 && !suppressAlert) {
+          triggerAudioAlert();
+          displayBannerNotification(`New submission: ${newlyReceivedEntries[0].username}`);
         }
       }
 
-      submissions = newSubmissions;
-      renderTable();
-      updateStats();
+      cachedSubmissionsList = latestEntries;
+      renderSubmissionsTable();
+      refreshMetricsDisplay();
     }
-  } catch (e) {
-    console.error(e);
+  } catch (refreshErr) {
+    console.error('Refresh error:', refreshErr);
   }
 }
 
-function updateStats() {
-  statTotal.textContent = submissions.length;
-  statPending.textContent = submissions.filter(s => s.status === 'pending').length;
-  statApproved.textContent = submissions.filter(s => s.status === 'approved').length;
-  statCompleted.textContent = submissions.filter(s => s.status === 'completed').length;
+function refreshMetricsDisplay() {
+  domStatTotal.textContent = cachedSubmissionsList.length;
+  domStatPending.textContent = cachedSubmissionsList.filter(item => item.status === 'pending').length;
+  domStatApproved.textContent = cachedSubmissionsList.filter(item => item.status === 'approved').length;
+  domStatCompleted.textContent = cachedSubmissionsList.filter(item => item.status === 'completed').length;
 }
 
-function renderTable() {
-  tableBody.innerHTML = '';
+function renderSubmissionsTable() {
+  domTableBody.innerHTML = '';
 
-  if (submissions.length === 0) {
-    tableBody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #747775; padding: 32px;">No submissions yet</td></tr>';
+  if (cachedSubmissionsList.length === 0) {
+    domTableBody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #747775; padding: 32px;">No submissions yet</td></tr>';
     return;
   }
 
-  submissions.forEach(sub => {
-    const tr = document.createElement('tr');
-    tr.id = `row-${sub.id}`;
+  cachedSubmissionsList.forEach(submissionRecord => {
+    const rowElement = document.createElement('tr');
+    rowElement.id = `row-${submissionRecord.id}`;
 
-    let statusBadge = `<span class="badge badge-${sub.status}">${sub.status}</span>`;
-    let actionCell = '-';
+    let statusMarkup = `<span class="badge badge-${submissionRecord.status}">${submissionRecord.status}</span>`;
+    let actionMarkup = '-';
 
-    if (sub.status === 'pending') {
-      actionCell = `
+    if (submissionRecord.status === 'pending') {
+      actionMarkup = `
         <div class="action-box">
-          <button type="button" class="btn-sm btn-approve" onclick="handleApprove(${sub.id})">Approve</button>
-          <button type="button" class="btn-sm btn-reject" onclick="handleReject(${sub.id})">Reject</button>
+          <button type="button" class="btn-sm btn-approve" onclick="executeApproveAction(${submissionRecord.id})">Approve</button>
+          <button type="button" class="btn-sm btn-reject" onclick="executeRejectAction(${submissionRecord.id})">Reject</button>
         </div>
       `;
     }
 
-    tr.innerHTML = `
-      <td>${sub.id}</td>
-      <td><strong>${escapeHtml(sub.username)}</strong></td>
-      <td><code>${escapeHtml(sub.submitted_coupon)}</code></td>
-      <td>${statusBadge}</td>
-      <td style="text-align: right;">${actionCell}</td>
+    rowElement.innerHTML = `
+      <td>${submissionRecord.id}</td>
+      <td><strong>${sanitizeHtmlString(submissionRecord.username)}</strong></td>
+      <td><code>${sanitizeHtmlString(submissionRecord.submitted_coupon)}</code></td>
+      <td>${statusMarkup}</td>
+      <td style="text-align: right;">${actionMarkup}</td>
     `;
 
-    tableBody.appendChild(tr);
+    domTableBody.appendChild(rowElement);
   });
 }
 
-function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function sanitizeHtmlString(unsafeString) {
+  if (!unsafeString) return '';
+  return String(unsafeString).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Copy to clipboard helper
-async function copyToClipboard(text) {
+async function copyTextToClipboard(textData) {
   try {
     if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(textData);
     } else {
-      const textArea = document.createElement('textarea');
-      textArea.value = text;
-      textArea.style.position = 'fixed';
-      textArea.style.left = '-999999px';
-      document.body.appendChild(textArea);
-      textArea.focus();
-      textArea.select();
+      const temporaryTextArea = document.createElement('textarea');
+      temporaryTextArea.value = textData;
+      temporaryTextArea.style.position = 'fixed';
+      temporaryTextArea.style.left = '-999999px';
+      document.body.appendChild(temporaryTextArea);
+      temporaryTextArea.focus();
+      temporaryTextArea.select();
       document.execCommand('copy');
-      textArea.remove();
+      temporaryTextArea.remove();
     }
-  } catch (err) {
-    console.error('Clipboard copy failed:', err);
+  } catch (copyErr) {
+    console.error('Clipboard copy error:', copyErr);
   }
 }
 
-// Global actions for inline buttons
-window.handleApprove = async function(id) {
-  const currentPin = pinInput.value.trim() || '1234';
+// Approve handler
+window.executeApproveAction = async function(recordId) {
+  const chosenPin = domInputPin.value.trim() || '12';
 
   try {
-    const res = await fetch(`/api/admin/submissions/${id}/approve`, {
+    const approveResponse = await fetch(`/api/admin/submissions/${recordId}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin: currentPin })
+      body: JSON.stringify({ pin: chosenPin })
     });
 
-    if (res.ok) {
-      const sub = submissions.find(s => s.id === id);
-      if (sub) {
-        sub.status = 'approved';
-        sub.reward_pin = currentPin;
-        renderTable();
-        updateStats();
+    if (approveResponse.ok) {
+      const targetRecord = cachedSubmissionsList.find(item => item.id === recordId);
+      if (targetRecord) {
+        targetRecord.status = 'approved';
+        targetRecord.reward_pin = chosenPin;
+        renderSubmissionsTable();
+        refreshMetricsDisplay();
 
-        // Automatic copy to clipboard: Username and Submitted Coupon
-        const textToCopy = `User: ${sub.username}\nCoupon: ${sub.submitted_coupon}`;
-        await copyToClipboard(textToCopy);
-        showToast('Copied user & coupon to clipboard');
+        const formattedClipboardText = `User: ${targetRecord.username}\nCoupon: ${targetRecord.submitted_coupon}`;
+        await copyTextToClipboard(formattedClipboardText);
+        displayBannerNotification('Copied user & coupon to clipboard');
       }
-      // Trigger background sync across all admins
-      loadSubmissions(true);
+      refreshSubmissionRecords(true);
     } else {
-      const err = await res.json();
-      alert(err.error || 'Failed to approve');
+      const errorData = await approveResponse.json();
+      alert(errorData.error || 'Failed to approve');
     }
-  } catch (err) {
-    console.error(err);
+  } catch (actionErr) {
+    console.error('Approve action error:', actionErr);
   }
 };
 
-window.handleReject = async function(id) {
+// Reject handler
+window.executeRejectAction = async function(recordId) {
   if (!confirm('Reject this submission?')) return;
 
   try {
-    const res = await fetch(`/api/admin/submissions/${id}/reject`, {
+    const rejectResponse = await fetch(`/api/admin/submissions/${recordId}/reject`, {
       method: 'POST'
     });
 
-    if (res.ok) {
-      const sub = submissions.find(s => s.id === id);
-      if (sub) {
-        sub.status = 'rejected';
-        renderTable();
-        updateStats();
+    if (rejectResponse.ok) {
+      const targetRecord = cachedSubmissionsList.find(item => item.id === recordId);
+      if (targetRecord) {
+        targetRecord.status = 'rejected';
+        renderSubmissionsTable();
+        refreshMetricsDisplay();
       }
-      loadSubmissions(true);
+      refreshSubmissionRecords(true);
     }
-  } catch (err) {
-    console.error(err);
+  } catch (actionErr) {
+    console.error('Reject action error:', actionErr);
   }
 };
 
-// Save PIN Setting
-btnSaveSettings.addEventListener('click', async () => {
-  const pin = pinInput.value.trim();
+// Save PIN
+domBtnSaveSettings.addEventListener('click', async () => {
+  const enteredPin = domInputPin.value.trim();
 
-  if (pin && (pin.length < 2 || pin.length > 4)) {
+  if (enteredPin && (enteredPin.length < 2 || enteredPin.length > 4)) {
     alert('PIN must be 2 to 4 digits');
     return;
   }
 
   try {
-    const res = await fetch('/api/admin/settings', {
+    const saveResponse = await fetch('/api/admin/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ global_pin: pin })
+      body: JSON.stringify({ global_pin: enteredPin })
     });
 
-    if (res.ok) {
-      showToast('PIN saved');
-      await loadSettings();
+    if (saveResponse.ok) {
+      displayBannerNotification('PIN saved');
+      await fetchSavedSettings();
     }
-  } catch (err) {
-    console.error(err);
+  } catch (saveErr) {
+    console.error('Settings save error:', saveErr);
   }
 });
 
 // Logout
-btnLogout.addEventListener('click', async () => {
-  if (pollTimer) clearInterval(pollTimer);
+domBtnLogout.addEventListener('click', async () => {
+  if (liveSyncIntervalTimer) clearInterval(liveSyncIntervalTimer);
   await fetch('/api/admin/logout', { method: 'POST' });
   window.location.href = '/admin/login';
 });
 
-// Multi-admin real-time sync: SSE + 2-second background polling
-function setupAdminRealtime() {
-  // Polling every 2s ensures that even across different Vercel serverless containers,
-  // multiple admins are always 100% in sync without missing a single submission or decision
-  pollTimer = setInterval(() => {
-    loadSubmissions(false);
+// Background sync & SSE for all active admins
+function startAdminSynchronization() {
+  liveSyncIntervalTimer = setInterval(() => {
+    refreshSubmissionRecords(false);
   }, 2000);
 
   try {
-    const sse = new EventSource('/api/admin/events');
+    const sseEventSubscriber = new EventSource('/api/admin/events');
 
-    sse.onmessage = async (event) => {
+    sseEventSubscriber.onmessage = async (incomingMsg) => {
       try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'new_submission') {
-          await loadSubmissions(false);
-        } else if (data.type === 'submission_approved' || data.type === 'submission_rejected' || data.type === 'status_updated') {
-          await loadSubmissions(true);
+        const eventData = JSON.parse(incomingMsg.data);
+        if (eventData.type === 'new_submission') {
+          await refreshSubmissionRecords(false);
+        } else if (
+          eventData.type === 'submission_approved' ||
+          eventData.type === 'submission_rejected' ||
+          eventData.type === 'status_updated'
+        ) {
+          await refreshSubmissionRecords(true);
         }
-      } catch (e) {
-        console.error(e);
+      } catch (parseErr) {
+        console.error('SSE message parsing error:', parseErr);
       }
     };
 
-    sse.onerror = () => {
-      // Reconnection handled automatically by browser; pollTimer keeps sync alive
+    sseEventSubscriber.onerror = () => {
+      // Automatic browser reconnection; interval timer keeps state synchronized
     };
-  } catch (e) {
-    console.error(e);
+  } catch (sseInitErr) {
+    console.error('SSE initialization error:', sseInitErr);
   }
 }
 
-// Init
+// Entrypoint
 (async () => {
-  const isAuthed = await checkAuth();
-  if (isAuthed) {
-    await loadSettings();
-    await loadSubmissions(true);
-    setupAdminRealtime();
+  const isAuthorized = await verifyAdminAuthentication();
+  if (isAuthorized) {
+    await fetchSavedSettings();
+    await refreshSubmissionRecords(true);
+    startAdminSynchronization();
   }
 })();

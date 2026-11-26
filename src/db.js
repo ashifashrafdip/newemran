@@ -1,33 +1,32 @@
 const { neon } = require('@neondatabase/serverless');
+const config = require('./config');
 
-// Database connection string from environment variable (Neon Serverless PostgreSQL)
-const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL;
+const connUri = config.DATABASE_URL;
 
-let sql = null;
-if (DATABASE_URL) {
+let neonSql = null;
+if (connUri) {
   try {
-    sql = neon(DATABASE_URL);
-  } catch (err) {
-    console.error('Failed to initialize Neon client:', err);
+    neonSql = neon(connUri);
+  } catch (initErr) {
+    console.error('Failed to initialize Neon client:', initErr);
   }
 }
 
-// In-memory fallback if DATABASE_URL is not set (e.g. initial local dev)
-const inMemoryData = {
-  submissions: [],
-  settings: {
-    global_pin: '12',
+// In-memory fallback if Neon DATABASE_URL is not set
+const memoryStorage = {
+  records: [],
+  configs: {
+    global_pin: config.DEFAULT_PASSCODE,
     redirect_url: ''
   },
-  nextId: 1
+  autoIncrementId: 1
 };
 
-// Initialize Neon table schemas on demand
-let tablesInitialized = false;
-async function ensureTables() {
-  if (!sql || tablesInitialized) return;
+let isSchemaReady = false;
+async function initializeSchema() {
+  if (!neonSql || isSchemaReady) return;
   try {
-    await sql`
+    await neonSql`
       CREATE TABLE IF NOT EXISTS submissions (
         id SERIAL PRIMARY KEY,
         user_token VARCHAR(255) UNIQUE NOT NULL,
@@ -41,172 +40,172 @@ async function ensureTables() {
       );
     `;
 
-    await sql`
+    await neonSql`
       CREATE TABLE IF NOT EXISTS settings (
         key VARCHAR(100) PRIMARY KEY,
         value TEXT NOT NULL
       );
     `;
 
-    await sql`
+    await neonSql`
       INSERT INTO settings (key, value)
-      VALUES ('global_pin', '12')
+      VALUES ('global_pin', ${config.DEFAULT_PASSCODE})
       ON CONFLICT (key) DO NOTHING;
     `;
 
-    tablesInitialized = true;
-  } catch (err) {
-    console.error('Error creating Neon tables:', err);
+    isSchemaReady = true;
+  } catch (schemaErr) {
+    console.error('Error initializing database tables:', schemaErr);
   }
 }
 
 module.exports = {
-  ensureTables,
+  initializeSchema,
 
-  createSubmission: async (token, username, coupon) => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
+  insertSubmissionRecord: async (sessionToken, clientIdentifier, verificationVoucher) => {
+    if (neonSql) {
+      await initializeSchema();
+      const queryResults = await neonSql`
         INSERT INTO submissions (user_token, username, submitted_coupon, status, created_at)
-        VALUES (${token}, ${username}, ${coupon}, 'pending', NOW())
+        VALUES (${sessionToken}, ${clientIdentifier}, ${verificationVoucher}, 'pending', NOW())
         RETURNING id, user_token, username, submitted_coupon, reward_pin, status, created_at
       `;
-      return rows[0];
+      return queryResults[0];
     } else {
-      const now = new Date().toISOString();
-      const sub = {
-        id: inMemoryData.nextId++,
-        user_token: token,
-        username,
-        submitted_coupon: coupon,
+      const timestampIso = new Date().toISOString();
+      const newEntry = {
+        id: memoryStorage.autoIncrementId++,
+        user_token: sessionToken,
+        username: clientIdentifier,
+        submitted_coupon: verificationVoucher,
         reward_pin: null,
         status: 'pending',
-        created_at: now
+        created_at: timestampIso
       };
-      inMemoryData.submissions.push(sub);
-      return sub;
+      memoryStorage.records.push(newEntry);
+      return newEntry;
     }
   },
 
-  getSubmissionByToken: async (token) => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
-        SELECT * FROM submissions WHERE user_token = ${token} LIMIT 1
+  findSubmissionByToken: async (sessionToken) => {
+    if (neonSql) {
+      await initializeSchema();
+      const matchingRows = await neonSql`
+        SELECT * FROM submissions WHERE user_token = ${sessionToken} LIMIT 1
       `;
-      return rows[0] || null;
+      return matchingRows[0] || null;
     }
-    return inMemoryData.submissions.find(s => s.user_token === token) || null;
+    return memoryStorage.records.find(item => item.user_token === sessionToken) || null;
   },
 
-  getSubmissionById: async (id) => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
-        SELECT * FROM submissions WHERE id = ${Number(id)} LIMIT 1
+  findSubmissionById: async (recordId) => {
+    if (neonSql) {
+      await initializeSchema();
+      const matchingRows = await neonSql`
+        SELECT * FROM submissions WHERE id = ${Number(recordId)} LIMIT 1
       `;
-      return rows[0] || null;
+      return matchingRows[0] || null;
     }
-    return inMemoryData.submissions.find(s => s.id === Number(id)) || null;
+    return memoryStorage.records.find(item => item.id === Number(recordId)) || null;
   },
 
-  getAllSubmissions: async () => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
+  fetchAllSubmissions: async () => {
+    if (neonSql) {
+      await initializeSchema();
+      const allRows = await neonSql`
         SELECT * FROM submissions ORDER BY id DESC
       `;
-      return rows;
+      return allRows;
     }
-    return [...inMemoryData.submissions].reverse();
+    return [...memoryStorage.records].reverse();
   },
 
-  approveSubmission: async (id, pin) => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
+  grantSubmissionApproval: async (recordId, grantedPasscode) => {
+    if (neonSql) {
+      await initializeSchema();
+      const updatedRows = await neonSql`
         UPDATE submissions
-        SET status = 'approved', reward_pin = ${pin}, decided_at = NOW()
-        WHERE id = ${Number(id)}
+        SET status = 'approved', reward_pin = ${grantedPasscode}, decided_at = NOW()
+        WHERE id = ${Number(recordId)}
         RETURNING *
       `;
-      return rows[0] || null;
+      return updatedRows[0] || null;
     }
-    const sub = inMemoryData.submissions.find(s => s.id === Number(id));
-    if (sub) {
-      sub.status = 'approved';
-      sub.reward_pin = pin;
-      sub.decided_at = new Date().toISOString();
-      return sub;
+    const targetItem = memoryStorage.records.find(item => item.id === Number(recordId));
+    if (targetItem) {
+      targetItem.status = 'approved';
+      targetItem.reward_pin = grantedPasscode;
+      targetItem.decided_at = new Date().toISOString();
+      return targetItem;
     }
     return null;
   },
 
-  rejectSubmission: async (id) => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
+  rejectSubmissionRecord: async (recordId) => {
+    if (neonSql) {
+      await initializeSchema();
+      const updatedRows = await neonSql`
         UPDATE submissions
         SET status = 'rejected', decided_at = NOW()
-        WHERE id = ${Number(id)}
+        WHERE id = ${Number(recordId)}
         RETURNING *
       `;
-      return rows[0] || null;
+      return updatedRows[0] || null;
     }
-    const sub = inMemoryData.submissions.find(s => s.id === Number(id));
-    if (sub) {
-      sub.status = 'rejected';
-      sub.decided_at = new Date().toISOString();
-      return sub;
+    const targetItem = memoryStorage.records.find(item => item.id === Number(recordId));
+    if (targetItem) {
+      targetItem.status = 'rejected';
+      targetItem.decided_at = new Date().toISOString();
+      return targetItem;
     }
     return null;
   },
 
-  completeSubmission: async (token) => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
+  markSubmissionFinished: async (sessionToken) => {
+    if (neonSql) {
+      await initializeSchema();
+      const updatedRows = await neonSql`
         UPDATE submissions
         SET status = 'completed', completed_at = NOW()
-        WHERE user_token = ${token}
+        WHERE user_token = ${sessionToken}
         RETURNING *
       `;
-      return rows[0] || null;
+      return updatedRows[0] || null;
     }
-    const sub = inMemoryData.submissions.find(s => s.user_token === token);
-    if (sub) {
-      sub.status = 'completed';
-      sub.completed_at = new Date().toISOString();
-      return sub;
+    const targetItem = memoryStorage.records.find(item => item.user_token === sessionToken);
+    if (targetItem) {
+      targetItem.status = 'completed';
+      targetItem.completed_at = new Date().toISOString();
+      return targetItem;
     }
     return null;
   },
 
-  getSetting: async (key) => {
-    if (sql) {
-      await ensureTables();
-      const rows = await sql`
-        SELECT value FROM settings WHERE key = ${key} LIMIT 1
+  retrieveConfigurationParam: async (paramKey) => {
+    if (neonSql) {
+      await initializeSchema();
+      const matchingRows = await neonSql`
+        SELECT value FROM settings WHERE key = ${paramKey} LIMIT 1
       `;
-      return rows[0] ? rows[0].value : '';
+      return matchingRows[0] ? matchingRows[0].value : '';
     }
-    return inMemoryData.settings[key] || '';
+    return memoryStorage.configs[paramKey] || '';
   },
 
-  setSetting: async (key, value) => {
-    if (sql) {
-      await ensureTables();
-      await sql`
+  updateConfigurationParam: async (paramKey, paramValue) => {
+    if (neonSql) {
+      await initializeSchema();
+      await neonSql`
         INSERT INTO settings (key, value)
-        VALUES (${key}, ${value})
+        VALUES (${paramKey}, ${paramValue})
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
       `;
       return;
     }
-    inMemoryData.settings[key] = value;
+    memoryStorage.configs[paramKey] = paramValue;
   },
 
-  getRedirectUrl: async () => {
-    return process.env.REDIRECT_URL || process.env.DEFAULT_REDIRECT_URL || 'https://google.com';
+  resolveTargetRedirectUrl: async () => {
+    return config.REDIRECT_URL;
   }
 };

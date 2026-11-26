@@ -1,41 +1,42 @@
-const EventEmitter = require('events');
-const eventBus = new EventEmitter();
+// Real-time Event Broadcaster across open client connections
+const connectedUserConnections = new Map(); // sessionToken => responseObj
+const activeAdminConnections = new Set(); // responseObj
 
-// In-memory connected SSE clients
-const userClients = new Map(); // token => res
-const adminClients = new Set(); // res
-
-function subscribeUser(token, res) {
-  userClients.set(token, res);
-  res.on('close', () => {
-    userClients.delete(token);
+function registerUserStream(sessionToken, responseObj) {
+  connectedUserConnections.set(sessionToken, responseObj);
+  responseObj.on('close', () => {
+    connectedUserConnections.delete(sessionToken);
   });
 }
 
-function notifyUser(token, data) {
-  const client = userClients.get(token);
-  if (client) {
-    client.write(`data: ${JSON.stringify(data)}\n\n`);
+function broadcastToUser(sessionToken, eventPayload) {
+  const targetedClient = connectedUserConnections.get(sessionToken);
+  if (targetedClient) {
+    targetedClient.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
   }
 }
 
-function subscribeAdmin(res) {
-  adminClients.add(res);
-  res.on('close', () => {
-    adminClients.delete(res);
+function registerAdminStream(responseObj) {
+  activeAdminConnections.add(responseObj);
+  responseObj.on('close', () => {
+    activeAdminConnections.delete(responseObj);
   });
 }
 
-function notifyAdmins(data) {
-  const payload = `data: ${JSON.stringify(data)}\n\n`;
-  for (const client of adminClients) {
-    client.write(payload);
+function broadcastToAllAdmins(eventPayload) {
+  const serializedMsg = `data: ${JSON.stringify(eventPayload)}\n\n`;
+  for (const adminSubscriber of activeAdminConnections) {
+    try {
+      adminSubscriber.write(serializedMsg);
+    } catch (writeErr) {
+      activeAdminConnections.delete(adminSubscriber);
+    }
   }
 }
 
 module.exports = {
-  subscribeUser,
-  notifyUser,
-  subscribeAdmin,
-  notifyAdmins
+  registerUserStream,
+  broadcastToUser,
+  registerAdminStream,
+  broadcastToAllAdmins
 };

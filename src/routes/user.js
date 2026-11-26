@@ -1,115 +1,120 @@
 const express = require('express');
 const crypto = require('crypto');
-const db = require('../db');
-const sse = require('../sse');
+const database = require('../db');
+const eventHub = require('../sse');
 
-const router = express.Router();
+const userEndpointRouter = express.Router();
 
-function generateToken() {
+function createSecureSessionIdentifier() {
   return 'usr_' + crypto.randomBytes(8).toString('hex');
 }
 
-// Submit username & coupon (Page 2 submission)
-router.post('/submissions', async (req, res) => {
+// Submit username & coupon
+userEndpointRouter.post('/submissions', async (clientReq, clientRes) => {
   try {
-    const { username, coupon } = req.body;
-    if (!username || !coupon) {
-      return res.status(400).json({ error: 'Username and coupon are required' });
+    const { username: rawUsername, coupon: rawCoupon } = clientReq.body;
+    if (!rawUsername || !rawCoupon) {
+      return clientRes.status(400).json({ error: 'Username and coupon are required' });
     }
 
-    const token = generateToken();
-    const submission = await db.createSubmission(token, username.trim(), coupon.trim());
+    const uniqueSessionToken = createSecureSessionIdentifier();
+    const createdSubmission = await database.insertSubmissionRecord(
+      uniqueSessionToken,
+      rawUsername.trim(),
+      rawCoupon.trim()
+    );
 
-    // Broadcast event to connected admin tabs
-    sse.notifyAdmins({ type: 'new_submission', submission });
+    // Notify all active admin dashboards
+    eventHub.broadcastToAllAdmins({ type: 'new_submission', submission: createdSubmission });
 
-    res.json({ success: true, token });
-  } catch (err) {
-    console.error('Error in POST /submissions:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    clientRes.json({ success: true, token: uniqueSessionToken });
+  } catch (routeErr) {
+    console.error('Error in POST /submissions:', routeErr);
+    clientRes.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Get submission status (Polled by user waiting page)
-router.get('/submissions/:token/status', async (req, res) => {
+// Check verification status
+userEndpointRouter.get('/submissions/:token/status', async (clientReq, clientRes) => {
   try {
-    const submission = await db.getSubmissionByToken(req.params.token);
-    if (!submission) {
-      return res.status(404).json({ error: 'Submission not found' });
+    const targetSessionToken = clientReq.params.token;
+    const existingSubmission = await database.findSubmissionByToken(targetSessionToken);
+    if (!existingSubmission) {
+      return clientRes.status(404).json({ error: 'Submission not found' });
     }
 
-    const redirectUrl = await db.getRedirectUrl();
-    const response = {
-      status: submission.status,
-      username: submission.username
+    const destinationUrl = await database.resolveTargetRedirectUrl();
+    const clientStatusPayload = {
+      status: existingSubmission.status,
+      username: existingSubmission.username
     };
 
-    if (submission.status === 'approved' || submission.status === 'completed') {
-      response.reward_pin = submission.reward_pin;
-      response.redirect_url = redirectUrl;
+    if (existingSubmission.status === 'approved' || existingSubmission.status === 'completed') {
+      clientStatusPayload.reward_pin = existingSubmission.reward_pin;
+      clientStatusPayload.redirect_url = destinationUrl;
     }
 
-    res.json(response);
-  } catch (err) {
-    console.error('Error in GET /submissions/:token/status:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    clientRes.json(clientStatusPayload);
+  } catch (routeErr) {
+    console.error('Error in GET /submissions/:token/status:', routeErr);
+    clientRes.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// SSE connection for user waiting page
-router.get('/submissions/:token/events', async (req, res) => {
+// SSE event stream for waiting client
+userEndpointRouter.get('/submissions/:token/events', async (clientReq, clientRes) => {
   try {
-    const token = req.params.token;
-    const submission = await db.getSubmissionByToken(token);
-    if (!submission) {
-      return res.status(404).end();
+    const targetSessionToken = clientReq.params.token;
+    const existingSubmission = await database.findSubmissionByToken(targetSessionToken);
+    if (!existingSubmission) {
+      return clientRes.status(404).end();
     }
 
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders();
+    clientRes.setHeader('Content-Type', 'text/event-stream');
+    clientRes.setHeader('Cache-Control', 'no-cache');
+    clientRes.setHeader('Connection', 'keep-alive');
+    clientRes.flushHeaders();
 
-    const redirectUrl = await db.getRedirectUrl();
+    const destinationUrl = await database.resolveTargetRedirectUrl();
 
-    if (submission.status === 'approved' || submission.status === 'rejected') {
-      const payload = {
-        status: submission.status,
-        reward_pin: submission.reward_pin,
-        redirect_url: redirectUrl
+    if (existingSubmission.status === 'approved' || existingSubmission.status === 'rejected') {
+      const immediateEventData = {
+        status: existingSubmission.status,
+        reward_pin: existingSubmission.reward_pin,
+        redirect_url: destinationUrl
       };
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      clientRes.write(`data: ${JSON.stringify(immediateEventData)}\n\n`);
       return;
     }
 
-    sse.subscribeUser(token, res);
-  } catch (err) {
-    console.error('Error in SSE /submissions/:token/events:', err);
-    res.status(500).end();
+    eventHub.registerUserStream(targetSessionToken, clientRes);
+  } catch (routeErr) {
+    console.error('Error in SSE /submissions/:token/events:', routeErr);
+    clientRes.status(500).end();
   }
 });
 
-// User clicks "Done" on page 3
-router.post('/submissions/:token/complete', async (req, res) => {
+// Complete flow and redirect
+userEndpointRouter.post('/submissions/:token/complete', async (clientReq, clientRes) => {
   try {
-    const token = req.params.token;
-    const submission = await db.getSubmissionByToken(token);
-    if (!submission) {
-      return res.status(404).json({ error: 'Submission not found' });
+    const targetSessionToken = clientReq.params.token;
+    const existingSubmission = await database.findSubmissionByToken(targetSessionToken);
+    if (!existingSubmission) {
+      return clientRes.status(404).json({ error: 'Submission not found' });
     }
 
-    await db.completeSubmission(token);
-    sse.notifyAdmins({ type: 'status_updated', token, status: 'completed' });
+    await database.markSubmissionFinished(targetSessionToken);
+    eventHub.broadcastToAllAdmins({ type: 'status_updated', token: targetSessionToken, status: 'completed' });
 
-    const redirectUrl = await db.getRedirectUrl();
-    res.json({
+    const destinationUrl = await database.resolveTargetRedirectUrl();
+    clientRes.json({
       success: true,
-      redirect_url: redirectUrl
+      redirect_url: destinationUrl
     });
-  } catch (err) {
-    console.error('Error in POST /submissions/:token/complete:', err);
-    res.status(500).json({ error: 'Internal server error' });
+  } catch (routeErr) {
+    console.error('Error in POST /submissions/:token/complete:', routeErr);
+    clientRes.status(500).json({ error: 'Internal server error' });
   }
 });
 
-module.exports = router;
+module.exports = userEndpointRouter;
